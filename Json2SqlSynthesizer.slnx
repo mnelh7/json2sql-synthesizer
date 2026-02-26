@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Json2SqlSynthesizer.Cli/Json2SqlSynthesizer.Cli.csproj" />
+  </Folder>
+</Solution>
