@@ -1,0 +1,334 @@
+{
+    "timespan": "hourly",
+    "timeStamps": {
+        "start": "2026-01-26T05:00:00.000Z",
+        "end": "2026-01-26T07:00:00.000Z"
+    },
+    "pkzData": [
+        {
+            "timeStamp": "2026-01-26T05:00:00.000Z",
+            "userData": [
+                {
+                    "name": "User 4",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T05:00:00.000Z",
+                            "end": "2026-01-26T05:33:52.995Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:36:53.774Z",
+                            "end": "2026-01-26T05:47:58.156Z"
+                        }
+                    ],
+                    "percentage": 0.7492713888888889
+                },
+                {
+                    "name": "User 1",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T05:33:52.995Z",
+                            "end": "2026-01-26T05:36:53.774Z"
+                        }
+                    ],
+                    "percentage": 0.05021638888888889
+                },
+                {
+                    "name": "User 3",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T05:47:58.156Z",
+                            "end": "2026-01-26T06:00:00.000Z"
+                        }
+                    ],
+                    "percentage": 0.20051222222222223
+                }
+            ],
+            "prodData": [
+                {
+                    "name": "Rezept 4",
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:00:00.000Z",
+                            "end": "2026-01-26T05:06:45.032Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:12:46.310Z",
+                            "end": "2026-01-26T05:21:49.811Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:23:50.471Z",
+                            "end": "2026-01-26T05:26:51.237Z"
+                        }
+                    ],
+                    "partData": {
+                        "amountIoParts": 888,
+                        "amountNioParts": 245,
+                        "amountTotalParts": 1133
+                    }
+                },
+                {
+                    "name": "Rezept 3",
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:06:45.032Z",
+                            "end": "2026-01-26T05:11:46.109Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:26:51.237Z",
+                            "end": "2026-01-26T05:35:53.387Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:36:53.774Z",
+                            "end": "2026-01-26T05:45:57.210Z"
+                        }
+                    ],
+                    "partData": {
+                        "amountIoParts": 1098,
+                        "amountNioParts": 275,
+                        "amountTotalParts": 1373
+                    }
+                },
+                {
+                    "name": "Rezept 1",
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:11:46.109Z",
+                            "end": "2026-01-26T05:12:46.310Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:21:49.811Z",
+                            "end": "2026-01-26T05:23:50.471Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:35:53.387Z",
+                            "end": "2026-01-26T05:36:53.774Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:45:57.210Z",
+                            "end": "2026-01-26T06:00:00.000Z"
+                        }
+                    ],
+                    "partData": {
+                        "amountIoParts": 847,
+                        "amountNioParts": 229,
+                        "amountTotalParts": 1076
+                    }
+                }
+            ],
+            "statusData": {
+                "stillstand": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                },
+                "service": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                },
+                "auto": {
+                    "count": 1,
+                    "timeSum": 903795,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:18:50.203Z",
+                            "end": "2026-01-26T05:33:53.998Z"
+                        }
+                    ]
+                },
+                "autoWait": {
+                    "count": 1,
+                    "timeSum": 603776,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:08:46.427Z",
+                            "end": "2026-01-26T05:18:50.203Z"
+                        }
+                    ]
+                },
+                "paused": {
+                    "count": 1,
+                    "timeSum": 118445,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:58:01.555Z",
+                            "end": "2026-01-26T06:00:00.000Z"
+                        }
+                    ]
+                },
+                "error": {
+                    "count": 2,
+                    "timeSum": 1190446,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:00:00.000Z",
+                            "end": "2026-01-26T05:08:46.427Z"
+                        },
+                        {
+                            "start": "2026-01-26T05:33:53.998Z",
+                            "end": "2026-01-26T05:44:58.017Z"
+                        }
+                    ]
+                },
+                "extError": {
+                    "count": 1,
+                    "timeSum": 783538,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T05:44:58.017Z",
+                            "end": "2026-01-26T05:58:01.555Z"
+                        }
+                    ]
+                },
+                "eStop": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                }
+            }
+        },
+        {
+            "timeStamp": "2026-01-26T06:00:00.000Z",
+            "userData": [
+                {
+                    "name": "User 3",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T06:00:00.000Z",
+                            "end": "2026-01-26T06:42:11.873Z"
+                        }
+                    ],
+                    "percentage": 0.7032980555555556
+                },
+                {
+                    "name": "User 2",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T06:42:11.873Z",
+                            "end": "2026-01-26T06:48:14.750Z"
+                        }
+                    ],
+                    "percentage": 0.10079916666666666
+                },
+                {
+                    "name": "User 1",
+                    "Timestamp": [
+                        {
+                            "start": "2026-01-26T06:42:11.873Z",
+                            "end": "2026-01-26T06:48:14.750Z"
+                        }
+                    ],
+                    "percentage": 0.10079916666666666
+                }
+            ],
+            "prodData": [
+                {
+                    "name": "Rezept 1",
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:00:00.000Z",
+                            "end": "2026-01-26T06:50:15.158Z"
+                        }
+                    ],
+                    "partData": {
+                        "amountIoParts": 2431,
+                        "amountNioParts": 614,
+                        "amountTotalParts": 3045
+                    }
+                },
+                {
+                    "name": "Rezept 2",
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:50:15.158Z",
+                            "end": "2026-01-26T06:56:16.443Z"
+                        }
+                    ],
+                    "partData": {
+                        "amountIoParts": 283,
+                        "amountNioParts": 76,
+                        "amountTotalParts": 359
+                    }
+                }
+            ],
+            "statusData": {
+                "stillstand": {
+                    "count": 1,
+                    "timeSum": 543481,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:42:12.875Z",
+                            "end": "2026-01-26T06:51:16.356Z"
+                        }
+                    ]
+                },
+                "service": {
+                    "count": 2,
+                    "timeSum": 1265382,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:04:02.825Z",
+                            "end": "2026-01-26T06:11:04.491Z"
+                        },
+                        {
+                            "start": "2026-01-26T06:28:09.159Z",
+                            "end": "2026-01-26T06:42:12.875Z"
+                        }
+                    ]
+                },
+                "auto": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                },
+                "autoWait": {
+                    "count": 2,
+                    "timeSum": 584095,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:19:06.973Z",
+                            "end": "2026-01-26T06:28:09.159Z"
+                        },
+                        {
+                            "start": "2026-01-26T06:59:18.091Z",
+                            "end": "2026-01-26T07:00:00.000Z"
+                        }
+                    ]
+                },
+                "paused": {
+                    "count": 3,
+                    "timeSum": 1207042,
+                    "timeStamps": [
+                        {
+                            "start": "2026-01-26T06:00:00.000Z",
+                            "end": "2026-01-26T06:04:02.825Z"
+                        },
+                        {
+                            "start": "2026-01-26T06:11:04.491Z",
+                            "end": "2026-01-26T06:19:06.973Z"
+                        },
+                        {
+                            "start": "2026-01-26T06:51:16.356Z",
+                            "end": "2026-01-26T06:59:18.091Z"
+                        }
+                    ]
+                },
+                "error": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                },
+                "extError": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                },
+                "eStop": {
+                    "count": 0,
+                    "timeSum": 0,
+                    "timeStamps": []
+                }
+            }
+        }
+    ]
+}
