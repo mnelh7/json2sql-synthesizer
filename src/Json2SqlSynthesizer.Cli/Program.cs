@@ -67,10 +67,8 @@ try
             return;
         }
 
-        // --force mode: reuse existing ingestion id
         ingestionId = existingIngestionId.Value;
 
-        // Optional: mark as Processing while we re-upsert silver tables
         await using (var setProcessing = new SqlCommand(
             "UPDATE dbo.IngestionLog SET ImportStatus='Processing', ErrorMessage=NULL WHERE IngestionId=@id",
             conn,
@@ -128,6 +126,7 @@ try
     if (!root.TryGetProperty("pkzData", out var pkzDataEl) || pkzDataEl.ValueKind != JsonValueKind.Array)
         throw new InvalidOperationException("Invalid JSON: pkzData missing or not an array.");
 
+    // MERGE SQL
     const string mergeHourSql = @"
 MERGE dbo.[Hour] AS tgt
 USING (SELECT @MachineId AS MachineId, @HourStartUtc AS HourStartUtc) AS src
@@ -168,15 +167,47 @@ WHEN NOT MATCHED THEN
     INSERT (MachineId, HourStartUtc, StatusName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
     VALUES (@MachineId, @HourStartUtc, @StatusName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
 
+    const string mergeProdSummarySql = @"
+MERGE dbo.ProdSummary AS tgt
+USING (SELECT @MachineId AS MachineId, @HourStartUtc AS HourStartUtc, @RecipeName AS RecipeName) AS src
+ON tgt.MachineId = src.MachineId AND tgt.HourStartUtc = src.HourStartUtc AND tgt.RecipeName = src.RecipeName
+WHEN MATCHED THEN
+    UPDATE SET IoParts=@IoParts, NioParts=@NioParts, TotalParts=@TotalParts, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, RecipeName, IoParts, NioParts, TotalParts, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @RecipeName, @IoParts, @NioParts, @TotalParts, @IngestionId);";
+
+    const string mergeProdIntervalSql = @"
+MERGE dbo.ProdInterval AS tgt
+USING (
+    SELECT @MachineId AS MachineId,
+           @HourStartUtc AS HourStartUtc,
+           @RecipeName AS RecipeName,
+           @IntervalStartUtc AS IntervalStartUtc,
+           @IntervalEndUtc AS IntervalEndUtc
+) AS src
+ON tgt.MachineId = src.MachineId
+AND tgt.HourStartUtc = src.HourStartUtc
+AND tgt.RecipeName = src.RecipeName
+AND tgt.IntervalStartUtc = src.IntervalStartUtc
+AND tgt.IntervalEndUtc = src.IntervalEndUtc
+WHEN MATCHED THEN
+    UPDATE SET DurationSec=@DurationSec, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, RecipeName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @RecipeName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
+
     int hourRows = 0;
     int statusSummaryRows = 0;
     int statusIntervalRows = 0;
+    int prodSummaryRows = 0;
+    int prodIntervalRows = 0;
 
     foreach (var hourObj in pkzDataEl.EnumerateArray())
     {
         var hourStartUtc = TryParseUtcRequired(hourObj, "timeStamp");
 
-        // 4a) Upsert Hour row
+        // Upsert Hour
         await using (var cmd = new SqlCommand(mergeHourSql, conn, (SqlTransaction)tx))
         {
             cmd.Parameters.AddWithValue("@MachineId", machineId);
@@ -189,7 +220,7 @@ WHEN NOT MATCHED THEN
             hourRows++;
         }
 
-        // 4b) StatusSummary + StatusInterval from statusData
+        // StatusSummary + StatusInterval
         if (hourObj.TryGetProperty("statusData", out var statusDataEl) && statusDataEl.ValueKind == JsonValueKind.Object)
         {
             foreach (var statusProp in statusDataEl.EnumerateObject())
@@ -205,7 +236,6 @@ WHEN NOT MATCHED THEN
                     ? tEl.GetInt64()
                     : 0L;
 
-                // Upsert StatusSummary
                 await using (var cmd = new SqlCommand(mergeStatusSummarySql, conn, (SqlTransaction)tx))
                 {
                     cmd.Parameters.AddWithValue("@MachineId", machineId);
@@ -218,7 +248,6 @@ WHEN NOT MATCHED THEN
                     statusSummaryRows++;
                 }
 
-                // Insert intervals if present
                 if (statusRec.TryGetProperty("timeStamps", out var intervalsEl) && intervalsEl.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var intervalObj in intervalsEl.EnumerateArray())
@@ -235,16 +264,67 @@ WHEN NOT MATCHED THEN
                         cmd.Parameters.AddWithValue("@IntervalEndUtc", endUtc);
                         cmd.Parameters.AddWithValue("@DurationSec", durationSec);
                         cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
-
                         await cmd.ExecuteNonQueryAsync();
                         statusIntervalRows++;
                     }
                 }
             }
         }
+
+        // Production: ProdSummary + ProdInterval
+        if (hourObj.TryGetProperty("prodData", out var prodDataEl) && prodDataEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var prodRec in prodDataEl.EnumerateArray())
+            {
+                string recipeName = prodRec.TryGetProperty("name", out var nameEl) ? (nameEl.GetString() ?? "") : "";
+                if (string.IsNullOrWhiteSpace(recipeName)) continue;
+
+                int io = 0, nio = 0, total = 0;
+                if (prodRec.TryGetProperty("partData", out var partEl) && partEl.ValueKind == JsonValueKind.Object)
+                {
+                    io = partEl.TryGetProperty("amountIoParts", out var ioEl) && ioEl.ValueKind == JsonValueKind.Number ? ioEl.GetInt32() : 0;
+                    nio = partEl.TryGetProperty("amountNioParts", out var nioEl) && nioEl.ValueKind == JsonValueKind.Number ? nioEl.GetInt32() : 0;
+                    total = partEl.TryGetProperty("amountTotalParts", out var tEl2) && tEl2.ValueKind == JsonValueKind.Number ? tEl2.GetInt32() : 0;
+                }
+
+                await using (var cmd = new SqlCommand(mergeProdSummarySql, conn, (SqlTransaction)tx))
+                {
+                    cmd.Parameters.AddWithValue("@MachineId", machineId);
+                    cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                    cmd.Parameters.AddWithValue("@RecipeName", recipeName);
+                    cmd.Parameters.AddWithValue("@IoParts", io);
+                    cmd.Parameters.AddWithValue("@NioParts", nio);
+                    cmd.Parameters.AddWithValue("@TotalParts", total);
+                    cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                    await cmd.ExecuteNonQueryAsync();
+                    prodSummaryRows++;
+                }
+
+                if (prodRec.TryGetProperty("timeStamps", out var prodIntervalsEl) && prodIntervalsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var intervalObj in prodIntervalsEl.EnumerateArray())
+                    {
+                        var startUtc = TryParseUtcRequired(intervalObj, "start");
+                        var endUtc = TryParseUtcRequired(intervalObj, "end");
+                        double durationSec = (endUtc - startUtc).TotalSeconds;
+
+                        await using var cmd = new SqlCommand(mergeProdIntervalSql, conn, (SqlTransaction)tx);
+                        cmd.Parameters.AddWithValue("@MachineId", machineId);
+                        cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                        cmd.Parameters.AddWithValue("@RecipeName", recipeName);
+                        cmd.Parameters.AddWithValue("@IntervalStartUtc", startUtc);
+                        cmd.Parameters.AddWithValue("@IntervalEndUtc", endUtc);
+                        cmd.Parameters.AddWithValue("@DurationSec", durationSec);
+                        cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                        await cmd.ExecuteNonQueryAsync();
+                        prodIntervalRows++;
+                    }
+                }
+            }
+        }
     }
 
-    // 5) Update IngestionLog with payload metadata + Imported status
+    // Update IngestionLog metadata + mark Imported
     await using (var updateLogCmd = new SqlCommand(@"
         UPDATE dbo.IngestionLog
         SET PayloadTimespan = @Timespan,
@@ -269,6 +349,8 @@ WHEN NOT MATCHED THEN
     Console.WriteLine($"Upserted Hour rows: {hourRows}");
     Console.WriteLine($"Upserted StatusSummary rows: {statusSummaryRows}");
     Console.WriteLine($"Upserted StatusInterval rows: {statusIntervalRows}");
+    Console.WriteLine($"Upserted ProdSummary rows: {prodSummaryRows}");
+    Console.WriteLine($"Upserted ProdInterval rows: {prodIntervalRows}");
 }
 catch (Exception ex)
 {
