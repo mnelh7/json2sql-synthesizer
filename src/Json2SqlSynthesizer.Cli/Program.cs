@@ -5,12 +5,13 @@ using Microsoft.Data.SqlClient;
 
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
-    Console.WriteLine("Usage: ingest <path-to-json> --machine-id <id>");
+    Console.WriteLine("Usage: ingest <path-to-json> --machine-id <id> [--force]");
     return;
 }
 
 string filePath = args[0];
 string machineId = "M01";
+bool force = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -37,52 +38,83 @@ await using var tx = await conn.BeginTransactionAsync();
 
 try
 {
-    // 1) Dedup check
-    var checkCmd = new SqlCommand(
-        "SELECT COUNT(*) FROM dbo.IngestionLog WHERE FileHashSha256 = @hash AND ImportStatus = 'Imported'",
+    // 1) Find existing ingestion by hash (if any)
+    int? existingIngestionId = null;
+    string? existingStatus = null;
+
+    await using (var findCmd = new SqlCommand(
+        "SELECT TOP 1 IngestionId, ImportStatus FROM dbo.IngestionLog WHERE FileHashSha256 = @hash ORDER BY IngestionId DESC",
         conn,
-        (SqlTransaction)tx);
-
-    checkCmd.Parameters.AddWithValue("@hash", fileHash);
-
-    int existing = (int)await checkCmd.ExecuteScalarAsync();
-    if (existing > 0)
+        (SqlTransaction)tx))
     {
-        Console.WriteLine("File already imported. Skipping.");
-        await tx.RollbackAsync();
-        return;
+        findCmd.Parameters.AddWithValue("@hash", fileHash);
+        await using var r = await findCmd.ExecuteReaderAsync();
+        if (await r.ReadAsync())
+        {
+            existingIngestionId = r.GetInt32(0);
+            existingStatus = r.GetString(1);
+        }
     }
 
-    // 2) Insert IngestionLog (Processing)
-    var insertLogCmd = new SqlCommand(@"
-        INSERT INTO dbo.IngestionLog (MachineId, SourceFileName, FileHashSha256, ImportStatus)
-        OUTPUT INSERTED.IngestionId
-        VALUES (@machineId, @fileName, @hash, 'Processing')",
-        conn,
-        (SqlTransaction)tx);
+    int ingestionId;
 
-    insertLogCmd.Parameters.AddWithValue("@machineId", machineId);
-    insertLogCmd.Parameters.AddWithValue("@fileName", Path.GetFileName(filePath));
-    insertLogCmd.Parameters.AddWithValue("@hash", fileHash);
+    if (existingIngestionId.HasValue)
+    {
+        if (!force && string.Equals(existingStatus, "Imported", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("File already imported. Skipping.");
+            await tx.RollbackAsync();
+            return;
+        }
 
-    int ingestionId = (int)await insertLogCmd.ExecuteScalarAsync();
+        // --force mode: reuse existing ingestion id
+        ingestionId = existingIngestionId.Value;
 
-    // 3) Insert RawPayload
-    var insertRawCmd = new SqlCommand(@"
-        INSERT INTO dbo.RawPayload (IngestionId, RawJson)
-        VALUES (@ingestionId, @rawJson)",
-        conn,
-        (SqlTransaction)tx);
+        // Optional: mark as Processing while we re-upsert silver tables
+        await using (var setProcessing = new SqlCommand(
+            "UPDATE dbo.IngestionLog SET ImportStatus='Processing', ErrorMessage=NULL WHERE IngestionId=@id",
+            conn,
+            (SqlTransaction)tx))
+        {
+            setProcessing.Parameters.AddWithValue("@id", ingestionId);
+            await setProcessing.ExecuteNonQueryAsync();
+        }
 
-    insertRawCmd.Parameters.AddWithValue("@ingestionId", ingestionId);
-    insertRawCmd.Parameters.AddWithValue("@rawJson", rawJson);
-    await insertRawCmd.ExecuteNonQueryAsync();
+        Console.WriteLine($"Reprocessing existing ingestion: {ingestionId} (force={force})");
+    }
+    else
+    {
+        // 2) Insert IngestionLog (Processing)
+        await using var insertLogCmd = new SqlCommand(@"
+            INSERT INTO dbo.IngestionLog (MachineId, SourceFileName, FileHashSha256, ImportStatus)
+            OUTPUT INSERTED.IngestionId
+            VALUES (@machineId, @fileName, @hash, 'Processing')",
+            conn,
+            (SqlTransaction)tx);
+
+        insertLogCmd.Parameters.AddWithValue("@machineId", machineId);
+        insertLogCmd.Parameters.AddWithValue("@fileName", Path.GetFileName(filePath));
+        insertLogCmd.Parameters.AddWithValue("@hash", fileHash);
+
+        ingestionId = (int)await insertLogCmd.ExecuteScalarAsync();
+
+        // 3) Insert RawPayload
+        await using var insertRawCmd = new SqlCommand(@"
+            INSERT INTO dbo.RawPayload (IngestionId, RawJson)
+            VALUES (@ingestionId, @rawJson)",
+            conn,
+            (SqlTransaction)tx);
+
+        insertRawCmd.Parameters.AddWithValue("@ingestionId", ingestionId);
+        insertRawCmd.Parameters.AddWithValue("@rawJson", rawJson);
+        await insertRawCmd.ExecuteNonQueryAsync();
+    }
 
     // 4) Parse JSON root + pkzData
     using var doc = JsonDocument.Parse(rawJson);
     var root = doc.RootElement;
 
-    string timespan = root.TryGetProperty("timespan", out var timespanEl) ? timespanEl.GetString() ?? "" : "";
+    string timespan = root.TryGetProperty("timespan", out var timespanEl) ? (timespanEl.GetString() ?? "") : "";
 
     DateTime? payloadStartUtc = null;
     DateTime? payloadEndUtc = null;
@@ -96,7 +128,6 @@ try
     if (!root.TryGetProperty("pkzData", out var pkzDataEl) || pkzDataEl.ValueKind != JsonValueKind.Array)
         throw new InvalidOperationException("Invalid JSON: pkzData missing or not an array.");
 
-    // Prepare MERGE commands
     const string mergeHourSql = @"
 MERGE dbo.[Hour] AS tgt
 USING (SELECT @MachineId AS MachineId, @HourStartUtc AS HourStartUtc) AS src
@@ -117,8 +148,29 @@ WHEN NOT MATCHED THEN
     INSERT (MachineId, HourStartUtc, StatusName, [Count], TimeSum, IngestionId)
     VALUES (@MachineId, @HourStartUtc, @StatusName, @Count, @TimeSum, @IngestionId);";
 
+    const string mergeStatusIntervalSql = @"
+MERGE dbo.StatusInterval AS tgt
+USING (
+    SELECT @MachineId AS MachineId,
+           @HourStartUtc AS HourStartUtc,
+           @StatusName AS StatusName,
+           @IntervalStartUtc AS IntervalStartUtc,
+           @IntervalEndUtc AS IntervalEndUtc
+) AS src
+ON tgt.MachineId = src.MachineId
+AND tgt.HourStartUtc = src.HourStartUtc
+AND tgt.StatusName = src.StatusName
+AND tgt.IntervalStartUtc = src.IntervalStartUtc
+AND tgt.IntervalEndUtc = src.IntervalEndUtc
+WHEN MATCHED THEN
+    UPDATE SET DurationSec=@DurationSec, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, StatusName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @StatusName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
+
     int hourRows = 0;
-    int statusRows = 0;
+    int statusSummaryRows = 0;
+    int statusIntervalRows = 0;
 
     foreach (var hourObj in pkzDataEl.EnumerateArray())
     {
@@ -133,12 +185,11 @@ WHEN NOT MATCHED THEN
             cmd.Parameters.AddWithValue("@PayloadStartUtc", (object?)payloadStartUtc ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@PayloadEndUtc", (object?)payloadEndUtc ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
-
             await cmd.ExecuteNonQueryAsync();
             hourRows++;
         }
 
-        // 4b) StatusSummary from statusData (dynamic keys)
+        // 4b) StatusSummary + StatusInterval from statusData
         if (hourObj.TryGetProperty("statusData", out var statusDataEl) && statusDataEl.ValueKind == JsonValueKind.Object)
         {
             foreach (var statusProp in statusDataEl.EnumerateObject())
@@ -154,22 +205,47 @@ WHEN NOT MATCHED THEN
                     ? tEl.GetInt64()
                     : 0L;
 
-                await using var cmd = new SqlCommand(mergeStatusSummarySql, conn, (SqlTransaction)tx);
-                cmd.Parameters.AddWithValue("@MachineId", machineId);
-                cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
-                cmd.Parameters.AddWithValue("@StatusName", statusName);
-                cmd.Parameters.AddWithValue("@Count", count);
-                cmd.Parameters.AddWithValue("@TimeSum", timeSum);
-                cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                // Upsert StatusSummary
+                await using (var cmd = new SqlCommand(mergeStatusSummarySql, conn, (SqlTransaction)tx))
+                {
+                    cmd.Parameters.AddWithValue("@MachineId", machineId);
+                    cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                    cmd.Parameters.AddWithValue("@StatusName", statusName);
+                    cmd.Parameters.AddWithValue("@Count", count);
+                    cmd.Parameters.AddWithValue("@TimeSum", timeSum);
+                    cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                    await cmd.ExecuteNonQueryAsync();
+                    statusSummaryRows++;
+                }
 
-                await cmd.ExecuteNonQueryAsync();
-                statusRows++;
+                // Insert intervals if present
+                if (statusRec.TryGetProperty("timeStamps", out var intervalsEl) && intervalsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var intervalObj in intervalsEl.EnumerateArray())
+                    {
+                        var startUtc = TryParseUtcRequired(intervalObj, "start");
+                        var endUtc = TryParseUtcRequired(intervalObj, "end");
+                        double durationSec = (endUtc - startUtc).TotalSeconds;
+
+                        await using var cmd = new SqlCommand(mergeStatusIntervalSql, conn, (SqlTransaction)tx);
+                        cmd.Parameters.AddWithValue("@MachineId", machineId);
+                        cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                        cmd.Parameters.AddWithValue("@StatusName", statusName);
+                        cmd.Parameters.AddWithValue("@IntervalStartUtc", startUtc);
+                        cmd.Parameters.AddWithValue("@IntervalEndUtc", endUtc);
+                        cmd.Parameters.AddWithValue("@DurationSec", durationSec);
+                        cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+
+                        await cmd.ExecuteNonQueryAsync();
+                        statusIntervalRows++;
+                    }
+                }
             }
         }
     }
 
     // 5) Update IngestionLog with payload metadata + Imported status
-    var updateLogCmd = new SqlCommand(@"
+    await using (var updateLogCmd = new SqlCommand(@"
         UPDATE dbo.IngestionLog
         SET PayloadTimespan = @Timespan,
             PayloadStartUtc = @PayloadStartUtc,
@@ -178,20 +254,21 @@ WHEN NOT MATCHED THEN
             ErrorMessage = NULL
         WHERE IngestionId = @IngestionId;",
         conn,
-        (SqlTransaction)tx);
-
-    updateLogCmd.Parameters.AddWithValue("@Timespan", (object)timespan ?? DBNull.Value);
-    updateLogCmd.Parameters.AddWithValue("@PayloadStartUtc", (object?)payloadStartUtc ?? DBNull.Value);
-    updateLogCmd.Parameters.AddWithValue("@PayloadEndUtc", (object?)payloadEndUtc ?? DBNull.Value);
-    updateLogCmd.Parameters.AddWithValue("@IngestionId", ingestionId);
-
-    await updateLogCmd.ExecuteNonQueryAsync();
+        (SqlTransaction)tx))
+    {
+        updateLogCmd.Parameters.AddWithValue("@Timespan", (object)timespan ?? DBNull.Value);
+        updateLogCmd.Parameters.AddWithValue("@PayloadStartUtc", (object?)payloadStartUtc ?? DBNull.Value);
+        updateLogCmd.Parameters.AddWithValue("@PayloadEndUtc", (object?)payloadEndUtc ?? DBNull.Value);
+        updateLogCmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+        await updateLogCmd.ExecuteNonQueryAsync();
+    }
 
     await tx.CommitAsync();
 
     Console.WriteLine($"Import successful. IngestionId = {ingestionId}");
     Console.WriteLine($"Upserted Hour rows: {hourRows}");
-    Console.WriteLine($"Upserted StatusSummary rows: {statusRows}");
+    Console.WriteLine($"Upserted StatusSummary rows: {statusSummaryRows}");
+    Console.WriteLine($"Upserted StatusInterval rows: {statusIntervalRows}");
 }
 catch (Exception ex)
 {
@@ -211,13 +288,9 @@ static DateTime? TryParseUtc(JsonElement obj, string propName)
 {
     if (!obj.TryGetProperty(propName, out var el)) return null;
     if (el.ValueKind != JsonValueKind.String) return null;
-
     var s = el.GetString();
     if (string.IsNullOrWhiteSpace(s)) return null;
-
-    // Parse ISO8601 with Z as UTC
-    var dto = DateTimeOffset.Parse(s);
-    return dto.UtcDateTime;
+    return DateTimeOffset.Parse(s).UtcDateTime;
 }
 
 static DateTime TryParseUtcRequired(JsonElement obj, string propName)
