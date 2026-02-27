@@ -80,6 +80,21 @@ try
             await setProcessing.ExecuteNonQueryAsync();
         }
 
+        await using (var cleanupCmd = new SqlCommand(@"
+            DELETE FROM dbo.UserInterval WHERE IngestionId=@id;
+            DELETE FROM dbo.UserShare WHERE IngestionId=@id;
+            DELETE FROM dbo.StatusInterval WHERE IngestionId=@id;
+            DELETE FROM dbo.StatusSummary WHERE IngestionId=@id;
+            DELETE FROM dbo.ProdInterval WHERE IngestionId=@id;
+            DELETE FROM dbo.ProdSummary WHERE IngestionId=@id;
+            DELETE FROM dbo.[Hour] WHERE IngestionId=@id;",
+            conn,
+            (SqlTransaction)tx))
+        {
+            cleanupCmd.Parameters.AddWithValue("@id", ingestionId);
+            await cleanupCmd.ExecuteNonQueryAsync();
+        }
+
         Console.WriteLine($"Reprocessing existing ingestion: {ingestionId} (force={force})");
     }
     else
@@ -149,7 +164,7 @@ WHEN NOT MATCHED THEN
     VALUES (@MachineId, @HourStartUtc, @StatusName, @Count, @TimeSum, @IngestionId);";
 
     const string mergeStatusIntervalSql = @"
-MERGE dbo.StatusInterval AS tgt
+MERGE dbo.StatusInterval WITH (HOLDLOCK) AS tgt
 USING (
     SELECT @MachineId AS MachineId,
            @HourStartUtc AS HourStartUtc,
@@ -168,9 +183,73 @@ WHEN NOT MATCHED THEN
     INSERT (MachineId, HourStartUtc, StatusName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
     VALUES (@MachineId, @HourStartUtc, @StatusName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
 
+    const string mergeProdSummarySql = @"
+MERGE dbo.ProdSummary AS tgt
+USING (SELECT @MachineId AS MachineId, @HourStartUtc AS HourStartUtc, @RecipeName AS RecipeName) AS src
+ON tgt.MachineId = src.MachineId AND tgt.HourStartUtc = src.HourStartUtc AND tgt.RecipeName = src.RecipeName
+WHEN MATCHED THEN
+    UPDATE SET IoParts=@IoParts, NioParts=@NioParts, TotalParts=@TotalParts, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, RecipeName, IoParts, NioParts, TotalParts, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @RecipeName, @IoParts, @NioParts, @TotalParts, @IngestionId);";
+
+    const string mergeProdIntervalSql = @"
+MERGE dbo.ProdInterval WITH (HOLDLOCK) AS tgt
+USING (
+    SELECT @MachineId AS MachineId,
+           @HourStartUtc AS HourStartUtc,
+           @RecipeName AS RecipeName,
+           @IntervalStartUtc AS IntervalStartUtc,
+           @IntervalEndUtc AS IntervalEndUtc
+) AS src
+ON tgt.MachineId = src.MachineId
+AND tgt.HourStartUtc = src.HourStartUtc
+AND tgt.RecipeName = src.RecipeName
+AND tgt.IntervalStartUtc = src.IntervalStartUtc
+AND tgt.IntervalEndUtc = src.IntervalEndUtc
+WHEN MATCHED THEN
+    UPDATE SET DurationSec=@DurationSec, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, RecipeName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @RecipeName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
+
+    const string mergeUserShareSql = @"
+MERGE dbo.UserShare AS tgt
+USING (SELECT @MachineId AS MachineId, @HourStartUtc AS HourStartUtc, @UserName AS UserName) AS src
+ON tgt.MachineId = src.MachineId AND tgt.HourStartUtc = src.HourStartUtc AND tgt.UserName = src.UserName
+WHEN MATCHED THEN
+    UPDATE SET Percentage=@Percentage, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, UserName, Percentage, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @UserName, @Percentage, @IngestionId);";
+
+    const string mergeUserIntervalSql = @"
+MERGE dbo.UserInterval WITH (HOLDLOCK) AS tgt
+USING (
+    SELECT @MachineId AS MachineId,
+           @HourStartUtc AS HourStartUtc,
+           @UserName AS UserName,
+           @IntervalStartUtc AS IntervalStartUtc,
+           @IntervalEndUtc AS IntervalEndUtc
+) AS src
+ON tgt.MachineId = src.MachineId
+AND tgt.HourStartUtc = src.HourStartUtc
+AND tgt.UserName = src.UserName
+AND tgt.IntervalStartUtc = src.IntervalStartUtc
+AND tgt.IntervalEndUtc = src.IntervalEndUtc
+WHEN MATCHED THEN
+    UPDATE SET DurationSec=@DurationSec, IngestionId=@IngestionId
+WHEN NOT MATCHED THEN
+    INSERT (MachineId, HourStartUtc, UserName, IntervalStartUtc, IntervalEndUtc, DurationSec, IngestionId)
+    VALUES (@MachineId, @HourStartUtc, @UserName, @IntervalStartUtc, @IntervalEndUtc, @DurationSec, @IngestionId);";
+
     int hourRows = 0;
     int statusSummaryRows = 0;
     int statusIntervalRows = 0;
+    int prodSummaryRows = 0;
+    int prodIntervalRows = 0;
+    int userShareRows = 0;
+    int userIntervalRows = 0;
 
     foreach (var hourObj in pkzDataEl.EnumerateArray())
     {
@@ -242,6 +321,104 @@ WHEN NOT MATCHED THEN
                 }
             }
         }
+
+        // 4c) Production: ProdSummary + ProdInterval
+        if (hourObj.TryGetProperty("prodData", out var prodDataEl) && prodDataEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var prodRec in prodDataEl.EnumerateArray())
+            {
+                string recipeName = prodRec.TryGetProperty("name", out var nameEl) ? (nameEl.GetString() ?? "") : "";
+                if (string.IsNullOrWhiteSpace(recipeName)) continue;
+
+                int io = 0, nio = 0, total = 0;
+                if (prodRec.TryGetProperty("partData", out var partEl) && partEl.ValueKind == JsonValueKind.Object)
+                {
+                    io = partEl.TryGetProperty("amountIoParts", out var ioEl) && ioEl.ValueKind == JsonValueKind.Number ? ioEl.GetInt32() : 0;
+                    nio = partEl.TryGetProperty("amountNioParts", out var nioEl) && nioEl.ValueKind == JsonValueKind.Number ? nioEl.GetInt32() : 0;
+                    total = partEl.TryGetProperty("amountTotalParts", out var tEl2) && tEl2.ValueKind == JsonValueKind.Number ? tEl2.GetInt32() : 0;
+                }
+
+                await using (var cmd = new SqlCommand(mergeProdSummarySql, conn, (SqlTransaction)tx))
+                {
+                    cmd.Parameters.AddWithValue("@MachineId", machineId);
+                    cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                    cmd.Parameters.AddWithValue("@RecipeName", recipeName);
+                    cmd.Parameters.AddWithValue("@IoParts", io);
+                    cmd.Parameters.AddWithValue("@NioParts", nio);
+                    cmd.Parameters.AddWithValue("@TotalParts", total);
+                    cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                    await cmd.ExecuteNonQueryAsync();
+                    prodSummaryRows++;
+                }
+
+                if (prodRec.TryGetProperty("timeStamps", out var prodIntervalsEl) && prodIntervalsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var intervalObj in prodIntervalsEl.EnumerateArray())
+                    {
+                        var startUtc = TryParseUtcRequired(intervalObj, "start");
+                        var endUtc = TryParseUtcRequired(intervalObj, "end");
+                        double durationSec = (endUtc - startUtc).TotalSeconds;
+
+                        await using var cmd = new SqlCommand(mergeProdIntervalSql, conn, (SqlTransaction)tx);
+                        cmd.Parameters.AddWithValue("@MachineId", machineId);
+                        cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                        cmd.Parameters.AddWithValue("@RecipeName", recipeName);
+                        cmd.Parameters.AddWithValue("@IntervalStartUtc", startUtc);
+                        cmd.Parameters.AddWithValue("@IntervalEndUtc", endUtc);
+                        cmd.Parameters.AddWithValue("@DurationSec", durationSec);
+                        cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                        await cmd.ExecuteNonQueryAsync();
+                        prodIntervalRows++;
+                    }
+                }
+            }
+        }
+
+        // 4d) UserShare + UserInterval from userData (Timestamp property has capital T)
+        if (hourObj.TryGetProperty("userData", out var userDataEl) && userDataEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var userRec in userDataEl.EnumerateArray())
+            {
+                string userName = userRec.TryGetProperty("name", out var userNameEl) ? (userNameEl.GetString() ?? "") : "";
+                if (string.IsNullOrWhiteSpace(userName)) continue;
+
+                double percentage = userRec.TryGetProperty("percentage", out var percentageEl) && percentageEl.ValueKind == JsonValueKind.Number
+                    ? percentageEl.GetDouble()
+                    : 0d;
+
+                await using (var cmd = new SqlCommand(mergeUserShareSql, conn, (SqlTransaction)tx))
+                {
+                    cmd.Parameters.AddWithValue("@MachineId", machineId);
+                    cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                    cmd.Parameters.AddWithValue("@UserName", userName);
+                    cmd.Parameters.AddWithValue("@Percentage", percentage);
+                    cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                    await cmd.ExecuteNonQueryAsync();
+                    userShareRows++;
+                }
+
+                if (userRec.TryGetProperty("Timestamp", out var userIntervalsEl) && userIntervalsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var intervalObj in userIntervalsEl.EnumerateArray())
+                    {
+                        var startUtc = TryParseUtcRequired(intervalObj, "start");
+                        var endUtc = TryParseUtcRequired(intervalObj, "end");
+                        double durationSec = (endUtc - startUtc).TotalSeconds;
+
+                        await using var cmd = new SqlCommand(mergeUserIntervalSql, conn, (SqlTransaction)tx);
+                        cmd.Parameters.AddWithValue("@MachineId", machineId);
+                        cmd.Parameters.AddWithValue("@HourStartUtc", hourStartUtc);
+                        cmd.Parameters.AddWithValue("@UserName", userName);
+                        cmd.Parameters.AddWithValue("@IntervalStartUtc", startUtc);
+                        cmd.Parameters.AddWithValue("@IntervalEndUtc", endUtc);
+                        cmd.Parameters.AddWithValue("@DurationSec", durationSec);
+                        cmd.Parameters.AddWithValue("@IngestionId", ingestionId);
+                        await cmd.ExecuteNonQueryAsync();
+                        userIntervalRows++;
+                    }
+                }
+            }
+        }
     }
 
     // 5) Update IngestionLog with payload metadata + Imported status
@@ -269,6 +446,10 @@ WHEN NOT MATCHED THEN
     Console.WriteLine($"Upserted Hour rows: {hourRows}");
     Console.WriteLine($"Upserted StatusSummary rows: {statusSummaryRows}");
     Console.WriteLine($"Upserted StatusInterval rows: {statusIntervalRows}");
+    Console.WriteLine($"Upserted ProdSummary rows: {prodSummaryRows}");
+    Console.WriteLine($"Upserted ProdInterval rows: {prodIntervalRows}");
+    Console.WriteLine($"Upserted UserShare rows: {userShareRows}");
+    Console.WriteLine($"Upserted UserInterval rows: {userIntervalRows}");
 }
 catch (Exception ex)
 {
