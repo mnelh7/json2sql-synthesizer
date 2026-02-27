@@ -78,6 +78,19 @@ try
             await setProcessing.ExecuteNonQueryAsync();
         }
 
+        await using (var cleanupCmd = new SqlCommand(@"
+            DELETE FROM dbo.StatusInterval WHERE IngestionId=@id;
+            DELETE FROM dbo.StatusSummary WHERE IngestionId=@id;
+            DELETE FROM dbo.ProdInterval WHERE IngestionId=@id;
+            DELETE FROM dbo.ProdSummary WHERE IngestionId=@id;
+            DELETE FROM dbo.[Hour] WHERE IngestionId=@id;",
+            conn,
+            (SqlTransaction)tx))
+        {
+            cleanupCmd.Parameters.AddWithValue("@id", ingestionId);
+            await cleanupCmd.ExecuteNonQueryAsync();
+        }
+
         Console.WriteLine($"Reprocessing existing ingestion: {ingestionId} (force={force})");
     }
     else
@@ -148,7 +161,7 @@ WHEN NOT MATCHED THEN
     VALUES (@MachineId, @HourStartUtc, @StatusName, @Count, @TimeSum, @IngestionId);";
 
     const string mergeStatusIntervalSql = @"
-MERGE dbo.StatusInterval AS tgt
+MERGE dbo.StatusInterval WITH (HOLDLOCK) AS tgt
 USING (
     SELECT @MachineId AS MachineId,
            @HourStartUtc AS HourStartUtc,
@@ -178,7 +191,7 @@ WHEN NOT MATCHED THEN
     VALUES (@MachineId, @HourStartUtc, @RecipeName, @IoParts, @NioParts, @TotalParts, @IngestionId);";
 
     const string mergeProdIntervalSql = @"
-MERGE dbo.ProdInterval AS tgt
+MERGE dbo.ProdInterval WITH (HOLDLOCK) AS tgt
 USING (
     SELECT @MachineId AS MachineId,
            @HourStartUtc AS HourStartUtc,
